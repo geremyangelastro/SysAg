@@ -2,31 +2,131 @@ import os
 from PIL import Image
 from transformers import pipeline
 
+def change_label(label):
+    """Conversione delle etichette."""
+    mapping = {
+        # Rabbia
+        "angry": "rabbia",
+        "anger": "rabbia",
+        # Disgusto
+        "disgust": "disgusto",
+        # Paura
+        "fear": "paura",
+        # Felicità/Gioia
+        "happy": "gioia",
+        "joy": "gioia",
+        # Tristezza
+        "sad": "tristezza",
+        "sadness": "tristezza",
+        # Sorpresa
+        "surprise": "sorpresa",
+        # Neutra
+        "neutral": "neutro",
+    }
+    return mapping.get(label.lower(), label.lower())
+
+def format_results(results, is_text_model=False):
+    """Converte l'output della pipeline in un dizionario pulito {emozione: score} con label standard."""
+    res_dict = {}
+    # Se è il modello di testo con top_k=None, i risultati sono dentro una lista [0]
+    items = results[0] if is_text_model else results
+
+    for item in items:
+        std_lbl = change_label(item["label"])
+        res_dict[std_lbl] = item["score"]
+    return res_dict
+
+def valuta_incongruenza(dict_visivo, dict_testo, soglia_differenza=0.3):
+    """Rileva incongruenza e/o masking."""
+
+    # 1. Prendiamo l'emozione preponderante
+    top_visivo = max(dict_visivo, key=dict_visivo.get)
+    score_visivo = dict_visivo[top_visivo]
+
+    top_testo = max(dict_testo, key=dict_testo.get)
+    score_testo = dict_testo[top_testo]
+
+    print(f"\n[Analisi Modelli]")
+    print(f" > Volto (Visivo): {top_visivo} ({score_visivo*100:.2f}%)")
+    print(f" > Testo:          {top_testo} ({score_testo*100:.2f}%)")
+
+    # 1. Se le emozioni principali sono DIVERSE -> Incongruenza strutturale
+    if top_visivo != top_testo:
+        return "INCONGRUENTE", top_visivo, top_testo, 1
+
+    # 2. Se sono UGUALI -> Controlliamo la differenza di intensità
+    diff = abs(score_visivo - score_testo)
+    if diff > soglia_differenza:
+        return "INCONGRUENTE", top_visivo, top_testo, diff
+    else:
+        return "CONGRUENTE", top_visivo, score_visivo
 
 def main():
-  print("Caricamento del modello in corso...")
-  # Inizializza la pipeline di classificazione immagini
-  classifier = pipeline("image-classification", model="trpakov/vit-face-expression")
+    print("=" * 60)
+    print("CONFRONTO MODELLO VISIVO vs MODELLO TESTUALE")
+    print("=" * 60)
 
-  # Percorso dell'immagine di test (puoi metterla nella cartella principale)
-  image_path = "volto_test.jpg"
-
-  if not os.path.exists(image_path):
-    print(
-        f"Attenzione: Non ho trovato l'immagine '{image_path}'. Inseriscine"
-        " una per continuare."
+    # 1. Inizializzazione Pipeline
+    vision_classifier = pipeline(
+        "image-classification", model="trpakov/vit-face-expression"
     )
-    return
+    text_classifier = pipeline(
+        "text-classification",
+        model="j-hartmann/emotion-english-distilroberta-base",
+        top_k=None,
+    )
 
-  # Carica l'immagine ed esegui la predizione
-  image = Image.open(image_path)
-  results = classifier(image)
+    # 2. Test Modello Visivo
+    image_path = "volto_test.jpg"
+    print(f"\n--- Analisi Immagine ({image_path}) ---")
+    if os.path.exists(image_path):
+        image = Image.open(image_path)
+        vision_results = vision_classifier(image)
 
-  print("\n--- RISULTATI ANALISI ESPRESSIONE ---")
-  for res in results:
-    # Stampa l'emozione e la percentuale di confidenza
-    print(f"Emoticon: {res['label']} -> Confidenza: {res['score']*100:.2f}%")
+        for res in vision_results[:3]:
+            std_label = change_label(res["label"])
+            print(f" [Visivo] {std_label.capitalize()} (Orig: {res['label']}) ->"
+                f" {res['score']*100:.2f}%"
+            )
+    else:
+        print("Immagine di test non trovata.")
 
+    # 3. Test Modello Testuale
+    frase_test = "Il vostro Johnny è qui!"
+    print(f"\n--- Analisi Testo ('{frase_test}') ---")
+    text_results = text_classifier(frase_test)
+
+    for res in text_results[0][:3]:
+        std_label = change_label(res["label"])
+        print(f" [Testo]  {std_label.capitalize()} (Orig: {res['label']}) ->"
+              f" {res['score']*100:.2f}%"
+        )
+
+    # Pulizia e standardizzazione nei dizionari
+    dict_visivo = format_results(vision_results, is_text_model=False)
+    dict_testo = format_results(text_results, is_text_model=True)
+
+    # --- VALUTAZIONE INCONGRUENZA ---
+    stato, emo1, emo2, diff= valuta_incongruenza(dict_visivo, dict_testo)
+
+    if stato == "INCONGRUENTE":
+        if diff == 1:
+            print(
+                f"\n⚠️ Rilevata INCONGRUENZA tra volto e testo"
+                f" (Volto: {emo1} vs Testo: {emo2})."
+            )
+        else:
+            print(
+                f"\n⚠️ Rilevata INCONGRUENZA tra volto e testo ({diff*100:.2f}%)"
+            )
+        print(
+            "-> Fase di esplorazione..."
+        )
+
+    else:
+        print(
+            "\n✅ Modelli CONGRUENTI. Late Fusion..."
+        )
 
 if __name__ == "__main__":
   main()

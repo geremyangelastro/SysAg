@@ -1,6 +1,5 @@
 transformers
 torch
-torchvision
 pillow
 gradio
 opencv-python
