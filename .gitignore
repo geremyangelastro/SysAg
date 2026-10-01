@@ -1,0 +1,15 @@
+# Ambiente virtuale
+venv/
+env/
+__pycache__/
+
+# Modelli scaricati o file temporanei di Hugging Face
+.cache/
+
+# Immagini personali o dataset di test
+test_images/*.jpg
+test_images/*.png
+
+# Editor di codice
+.vscode/
+.idea/
