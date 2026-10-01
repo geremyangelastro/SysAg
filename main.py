@@ -36,7 +36,7 @@ def format_results(results, is_text_model=False):
         res_dict[std_lbl] = item["score"]
     return res_dict
 
-def valuta_incongruenza(dict_visivo, dict_testo, soglia_differenza=0.3):
+def valuta_incongruenza(dict_visivo, dict_testo, soglia_differenza=0.7):
     """Rileva incongruenza e/o masking."""
 
     # 1. Selezione dell'emozione preponderante da ciascun modello
