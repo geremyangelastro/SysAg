@@ -39,7 +39,7 @@ def format_results(results, is_text_model=False):
 def valuta_incongruenza(dict_visivo, dict_testo, soglia_differenza=0.3):
     """Rileva incongruenza e/o masking."""
 
-    # 1. Prendiamo l'emozione preponderante
+    # 1. Selezione dell'emozione preponderante da ciascun modello
     top_visivo = max(dict_visivo, key=dict_visivo.get)
     score_visivo = dict_visivo[top_visivo]
 
@@ -47,19 +47,19 @@ def valuta_incongruenza(dict_visivo, dict_testo, soglia_differenza=0.3):
     score_testo = dict_testo[top_testo]
 
     print(f"\n[Analisi Modelli]")
-    print(f" > Volto (Visivo): {top_visivo} ({score_visivo*100:.2f}%)")
-    print(f" > Testo:          {top_testo} ({score_testo*100:.2f}%)")
+    print(f" > Volto: {top_visivo} ({score_visivo*100:.2f}%)")
+    print(f" > Testo: {top_testo} ({score_testo*100:.2f}%)")
 
-    # 1. Se le emozioni principali sono DIVERSE -> Incongruenza strutturale
+    # 2. Se le emozioni principali sono DIVERSE -> Incongruenza strutturale
     if top_visivo != top_testo:
         return "INCONGRUENTE", top_visivo, top_testo, 1
 
-    # 2. Se sono UGUALI -> Controlliamo la differenza di intensità
+    # 3. Se sono UGUALI -> Controlliamo la differenza di intensità
     diff = abs(score_visivo - score_testo)
     if diff > soglia_differenza:
         return "INCONGRUENTE", top_visivo, top_testo, diff
     else:
-        return "CONGRUENTE", top_visivo, score_visivo
+        return "CONGRUENTE", top_visivo, score_visivo, diff
 
 def main():
     print("=" * 60)
@@ -85,7 +85,7 @@ def main():
 
         for res in vision_results[:3]:
             std_label = change_label(res["label"])
-            print(f" [Visivo] {std_label.capitalize()} (Orig: {res['label']}) ->"
+            print(f" {std_label.capitalize()} (Orig: {res['label']}) ->"
                 f" {res['score']*100:.2f}%"
             )
     else:
@@ -98,7 +98,7 @@ def main():
 
     for res in text_results[0][:3]:
         std_label = change_label(res["label"])
-        print(f" [Testo]  {std_label.capitalize()} (Orig: {res['label']}) ->"
+        print(f" {std_label.capitalize()} (Orig: {res['label']}) ->"
               f" {res['score']*100:.2f}%"
         )
 
@@ -112,12 +112,11 @@ def main():
     if stato == "INCONGRUENTE":
         if diff == 1:
             print(
-                f"\n⚠️ Rilevata INCONGRUENZA tra volto e testo"
-                f" (Volto: {emo1} vs Testo: {emo2})."
+                f"\n⚠️ Rilevata INCONGRUENZA STRUTTURALE tra volto e testo"
             )
         else:
             print(
-                f"\n⚠️ Rilevata INCONGRUENZA tra volto e testo ({diff*100:.2f}%)"
+                f"\n⚠️ Rilevata INCONGRUENZA tra volto e testo (differenza: {diff*100:.2f}%)"
             )
         print(
             "-> Fase di esplorazione..."
@@ -125,7 +124,7 @@ def main():
 
     else:
         print(
-            "\n✅ Modelli CONGRUENTI. Late Fusion..."
+            f"\n✅ Modelli CONGRUENTI (differenza: {diff*100:.2f}%). \n->Late Fusion..."
         )
 
 if __name__ == "__main__":
