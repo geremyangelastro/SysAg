@@ -7,9 +7,11 @@ __pycache__/
 .cache/
 
 # Immagini personali o dataset di test
-test_images/*.jpg
-test_images/*.png
-test_texts/*.txt
+test_images/*
+!test_images/.gitkeep
+
+test_texts/*
+!test_texts/.gitkeep
 
 # Editor di codice
 .vscode/
