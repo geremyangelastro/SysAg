@@ -1,175 +1,163 @@
-import os
+import threading
+import time
 from PIL import Image
 from transformers import pipeline
+import webview
+import gradio as gr
 
+print("Caricamento dei modelli in corso...")
+vision_classifier = pipeline("image-classification", model="trpakov/vit-face-expression")
+text_classifier = pipeline("text-classification", model="j-hartmann/emotion-english-distilroberta-base", top_k=None,)
+print("Modelli caricati con successo!")
 
 def change_label(label):
-  """Conversione delle etichette."""
-  mapping = {
-      # Rabbia
-      "angry": "rabbia",
-      "anger": "rabbia",
-      # Disgusto
-      "disgust": "disgusto",
-      # Paura
-      "fear": "paura",
-      # Felicità/Gioia
-      "happy": "gioia",
-      "joy": "gioia",
-      # Tristezza
-      "sad": "tristezza",
-      "sadness": "tristezza",
-      # Sorpresa
-      "surprise": "sorpresa",
-      # Neutra
-      "neutral": "neutro",
-  }
-  return mapping.get(label.lower(), label.lower())
-
+    mapping = {
+        "angry": "rabbia",
+        "anger": "rabbia",
+        "disgust": "disgusto",
+        "fear": "paura",
+        "happy": "gioia",
+        "joy": "gioia",
+        "sad": "tristezza",
+        "sadness": "tristezza",
+        "surprise": "sorpresa",
+        "neutral": "neutro",
+    }
+    return mapping.get(label.lower(), label.lower())
 
 def format_results(results, is_text_model=False):
-  """Converte l'output della pipeline in un dizionario pulito {emozione: score} con label standard."""
-  res_dict = {}
-  items = results[0] if is_text_model else results
+    res_dict = {}
+    items = results[0] if is_text_model else results
+    for item in items:
+        std_lbl = change_label(item["label"])
+        res_dict[std_lbl] = item["score"]
+    return res_dict
 
-  for item in items:
-    std_lbl = change_label(item["label"])
-    res_dict[std_lbl] = item["score"]
-  return res_dict
+def risposta_chat(user_message, webcam_frame, history):
+    """Riceve testo, frame PIL dalla webcam e storico."""
+    if history is None:
+        history = []
 
+    if user_message is None or not str(user_message).strip():
+        return "", history
 
-def valuta_incongruenza(dict_visivo, dict_testo, soglia_differenza=0.7):
-  """Rileva incongruenza e/o masking."""
-  top_visivo = max(dict_visivo, key=dict_visivo.get)
-  score_visivo = dict_visivo[top_visivo]
+    user_message = str(user_message).strip()
 
-  top_testo = max(dict_testo, key=dict_testo.get)
-  score_testo = dict_testo[top_testo]
+    if webcam_frame is None:
+        history.append({"role": "user", "content": user_message})
+        history.append({"role": "assistant", "content": "⚠️ **Attenzione:** Nessun fotogramma ricevuto dalla webcam. Assicurati di aver concesso i permessi della fotocamera."})
+        return "", history
 
-  print(f"\n[Analisi Modelli]")
-  print(f" > Volto: {top_visivo} ({score_visivo*100:.2f}%)")
-  print(f" > Testo: {top_testo} ({score_testo*100:.2f}%)")
-
-  if top_visivo != top_testo:
-    return "INCONGRUENTE", top_visivo, top_testo, 1
-
-  diff = abs(score_visivo - score_testo)
-  if diff > soglia_differenza:
-    return "INCONGRUENTE", top_visivo, top_testo, diff
-  else:
-    return "CONGRUENTE", top_visivo, score_visivo, diff
-
-
-def scegli_file(cartella, estensioni_valide):
-  """Scansiona una cartella, mostra i file disponibili e permette all'utente di sceglierne uno."""
-  if not os.path.exists(cartella):
-    print(
-        f"La cartella '{cartella}' non esiste. La creo automaticamente per te."
-    )
-    os.makedirs(cartella)
-    return None
-
-  # Filtra i file in base alle estensioni ammesse
-  files = [
-      f
-      for f in os.listdir(cartella)
-      if os.path.isfile(os.path.join(cartella, f))
-      and f.lower().endswith(tuple(estensioni_valide))
-  ]
-
-  if not files:
-    print(f"Nessun file compatibile trovato nella cartella '{cartella}'.")
-    return None
-
-  print(f"\n--- File disponibili in '{cartella}' ---")
-  for i, nome_file in enumerate(files, 1):
-    print(f" [{i}] {nome_file}")
-
-  while True:
     try:
-      scelta = int(input(f"Seleziona il numero del file (1-{len(files)}): "))
-      if 1 <= scelta <= len(files):
-        percorso_scelto = os.path.join(cartella, files[scelta - 1])
-        return percorso_scelto
-      else:
-        print("Numero non valido. Riprova.")
-    except ValueError:
-      print("Inserisci un numero intero valido.")
+        frame_corrente = (
+            webcam_frame.convert("RGB")
+            if isinstance(webcam_frame, Image.Image)
+            else Image.fromarray(webcam_frame).convert("RGB")
+        )
+    except Exception as e:
+        history.append({"role": "user", "content": user_message})
+        history.append({"role": "assistant", "content": f"⚠️ Errore nell'elaborazione del fotogramma: {str(e)}"})
+        return "", history
 
+    # 1. Esecuzione dei modelli
+    raw_vision = vision_classifier(frame_corrente)
+    raw_text = text_classifier(user_message)
 
-def main():
-  print("=" * 60)
-  print("CONFRONTO MODELLO VISIVO vs MODELLO TESTUALE")
-  print("=" * 60)
+    dict_visivo = format_results(raw_vision, is_text_model=False)
+    dict_testo = format_results(raw_text, is_text_model=True)
 
-  # 1. Inizializzazione Pipeline
-  print("Caricamento modelli in corso...")
-  vision_classifier = pipeline(
-      "image-classification", model="trpakov/vit-face-expression"
-  )
-  text_classifier = pipeline(
-      "text-classification",
-      model="j-hartmann/emotion-english-distilroberta-base",
-      top_k=None,
-  )
+    top_visivo = max(dict_visivo, key=dict_visivo.get)
+    score_visivo = dict_visivo[top_visivo]
 
-  # 2. Selezione dinamica Immagine
-  print("\n[Selezione Immagine Volto]")
-  image_path = scegli_file("test_images", [".jpg", ".jpeg", ".png"])
-  if not image_path:
-    print("Impossibile procedere senza un'immagine.")
-    return
+    top_testo = max(dict_testo, key=dict_testo.get)
+    score_testo = dict_testo[top_testo]
 
-  print(f"Hai selezionato l'immagine: {image_path}")
-  image = Image.open(image_path)
-  vision_results = vision_classifier(image)
+    # 2. Valutazione incongruenza
+    soglia_differenza = 0.7
 
-  print("\nRisultati:")
-  for res in vision_results[:3]:
-    std_label = change_label(res["label"])
-    print(f" - {std_label.capitalize()} -> {res['score']*100:.2f}%")
+    risposta_bot = "🧠 **Analisi Multimodale:**\n"
+    risposta_bot += f"- **Volto:** {top_visivo.capitalize()} ({score_visivo*100:.2f}%)\n"
+    risposta_bot += f"- **Testo:** {top_testo.capitalize()} ({score_testo*100:.2f}%)\n\n"
 
-  # 3. Selezione dinamica Testo
-  print("\n[Selezione File di Testo]")
-  text_path = scegli_file("test_texts", [".txt"])
-  if not text_path:
-    print("Impossibile procedere senza un file di testo.")
-    return
-
-  print(f"Hai selezionato il testo: {text_path}")
-  with open(text_path, "r", encoding="utf-8") as file:
-    frase_test = file.read().strip()
-
-  print(f"Testo caricato: '{frase_test}'")
-  text_results = text_classifier(frase_test)
-
-  print("\nRisultati:")
-  for res in text_results[0][:3]:
-    std_label = change_label(res["label"])
-    print(f" - {std_label.capitalize()} -> {res['score']*100:.2f}%")
-
-  # Pulizia e standardizzazione nei dizionari
-  dict_visivo = format_results(vision_results, is_text_model=False)
-  dict_testo = format_results(text_results, is_text_model=True)
-
-  # --- VALUTAZIONE INCONGRUENZA ---
-  stato, emo1, emo2, diff = valuta_incongruenza(dict_visivo, dict_testo)
-
-  if stato == "INCONGRUENTE":
-    if diff == 1:
-      print("\n⚠️ Rilevata INCONGRUENZA STRUTTURALE tra volto e testo")
+    if top_visivo != top_testo:
+        risposta_bot += "⚠️ **Rilevata INCONGRUENZA STRUTTURALE** tra volto e testo. -> *Fase di Esplorazione*."
     else:
-      print(
-          f"\n⚠️ Rilevata INCONGRUENZA tra volto e testo (differenza:"
-          f" {diff*100:.2f}%)"
-      )
-    print("-> Fase di esplorazione...")
-  else:
-    print(
-        f"\n✅ Modelli CONGRUENTI (differenza: {diff*100:.2f}%).\n-> Late"
-        " Fusion..."
+        diff = abs(score_visivo - score_testo)
+        if diff > soglia_differenza:
+            risposta_bot += f"⚠️ **Incongruenza di intensità** (differenza: {diff*100:.2f}%). -> *Fase di Esplorazione*."
+        else:
+            risposta_bot += f"✅ **Modelli Congruenti** (differenza: {diff*100:.2f}%). -> *Late Fusion*."
+
+    history.append({"role": "user", "content": user_message})
+    history.append({"role": "assistant", "content": risposta_bot})
+
+    return "", history
+
+with gr.Blocks() as demo:
+    gr.Markdown("# 🧠 Sistema Multimodale Emotional Management")
+
+    with gr.Row():
+        with gr.Column(scale=1):
+            gr.Markdown("### 📷 Webcam Live")
+            webcam_input = gr.Image(
+                sources=["webcam"],
+                streaming=True,
+                type="pil",
+                label=None,
+                show_label=False,
+                webcam_options=gr.WebcamOptions(
+                    mirror=True,
+                    constraints={
+                        "video": {
+                            "width":     {"ideal": 320},
+                            "height":    {"ideal": 240},
+                            "frameRate": {"ideal": 8, "max": 10},
+                        }
+                    },
+                ),
+            )
+
+        with gr.Column(scale=2):
+            gr.Markdown("### 💬 Chat")
+            chatbot = gr.Chatbot(height=500)
+
+            with gr.Row():
+                msg = gr.Textbox(
+                    placeholder="Scrivi qui come ti senti...", container=False, scale=8
+                )
+                btn_invia = gr.Button("Invia", variant="primary", scale=1)
+
+    msg.submit(
+        fn=risposta_chat,
+        inputs=[msg, webcam_input, chatbot],
+        outputs=[msg, chatbot],
     )
 
+    btn_invia.click(
+        fn=risposta_chat,
+        inputs=[msg, webcam_input, chatbot],
+        outputs=[msg, chatbot],
+    )
+
+def avvia_server():
+    demo.launch(
+        server_port=7860,
+        prevent_thread_lock=True,
+        quiet=True,
+        theme=gr.themes.Soft(),
+    )
 
 if __name__ == "__main__":
-  main()
+    t = threading.Thread(target=avvia_server, daemon=True)
+    t.start()
+
+    # Attendi che il server Gradio sia pronto prima di aprire la WebView
+    time.sleep(2)
+
+    webview.create_window(
+        "Sistema Emozionale Multimodale",
+        "http://127.0.0.1:7860",
+        width=1300,
+        height=800,
+    )
+    webview.start()
