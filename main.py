@@ -1,5 +1,6 @@
 import threading
 import time
+from collections import Counter
 from PIL import Image
 from transformers import pipeline
 import webview
@@ -33,68 +34,104 @@ def format_results(results, is_text_model=False):
         res_dict[std_lbl] = item["score"]
     return res_dict
 
-def risposta_chat(user_message, webcam_frame, history):
-    """Riceve testo, frame PIL dalla webcam e storico."""
+def update_buffer(new_frame, current_buffer):
+    """Mantiene un buffer aggiornato degli ultimi 5 frame provenienti dallo stream."""
+    if current_buffer is None:
+        current_buffer = []
+    if new_frame is not None:
+        try:
+            img = (
+                new_frame.convert("RGB")
+                if isinstance(new_frame, Image.Image)
+                else Image.fromarray(new_frame).convert("RGB")
+            )
+            current_buffer.append(img)
+            current_buffer = current_buffer[-5:]
+        except Exception:
+            pass
+    return current_buffer
+
+def risposta_chat(user_message, buffer_frames, history):
+    """Riceve testo, buffer degli ultimi 5 frame e storico, restituendo un feedback in streaming."""
     if history is None:
         history = []
 
     if user_message is None or not str(user_message).strip():
-        return "", history
+        yield "", history
+        return
 
     user_message = str(user_message).strip()
 
-    if webcam_frame is None:
-        history.append({"role": "user", "content": user_message})
-        history.append({"role": "assistant", "content": "⚠️ **Attenzione:** Nessun fotogramma ricevuto dalla webcam. Assicurati di aver concesso i permessi della fotocamera."})
-        return "", history
+    history.append({"role": "user", "content": user_message})
+    history.append({"role": "assistant", "content": "⏳ *Analisi multimodale in corso... attendi.*"})
+    
+    yield "", history
+
+    time.sleep(0.2)
+
+    if not buffer_frames:
+        history[-1]["content"] = "⚠️ **Attenzione:** Nessun fotogramma ricevuto dalla webcam. Assicurati di aver concesso i permessi della fotocamera e attendi qualche istante."
+        yield "", history
+        return
 
     try:
-        frame_corrente = (
-            webcam_frame.convert("RGB")
-            if isinstance(webcam_frame, Image.Image)
-            else Image.fromarray(webcam_frame).convert("RGB")
-        )
-    except Exception as e:
-        history.append({"role": "user", "content": user_message})
-        history.append({"role": "assistant", "content": f"⚠️ Errore nell'elaborazione del fotogramma: {str(e)}"})
-        return "", history
+        # 1. Esecuzione modello Testo
+        raw_text = text_classifier(user_message)
+        dict_testo = format_results(raw_text, is_text_model=True)
+        top_testo = max(dict_testo, key=dict_testo.get)
+        score_testo = dict_testo[top_testo]
 
-    # 1. Esecuzione dei modelli
-    raw_vision = vision_classifier(frame_corrente)
-    raw_text = text_classifier(user_message)
+        # 2. Analisi dei 5 Frame Visivi
+        risultati_visione = []
+        for frame in buffer_frames:
+            raw_vision = vision_classifier(frame)
+            dict_visivo = format_results(raw_vision, is_text_model=False)
+            top_emozione = max(dict_visivo, key=dict_visivo.get)
+            score = dict_visivo[top_emozione]
+            risultati_visione.append((top_emozione, score, dict_visivo))
 
-    dict_visivo = format_results(raw_vision, is_text_model=False)
-    dict_testo = format_results(raw_text, is_text_model=True)
+        # Trova l'emozione predominante tra i 5 frame
+        conteggio_emozioni = Counter([res[0] for res in risultati_visione])
+        emozione_predominante = conteggio_emozioni.most_common(1)[0][0]
 
-    top_visivo = max(dict_visivo, key=dict_visivo.get)
-    score_visivo = dict_visivo[top_visivo]
+        # Seleziona l'analisi con l'accuratezza maggiore per l'emozione predominante
+        miglior_risultato = None
+        for res in risultati_visione:
+            if res[0] == emozione_predominante:
+                if miglior_risultato is None or res[1] > miglior_risultato[1]:
+                    miglior_risultato = res
 
-    top_testo = max(dict_testo, key=dict_testo.get)
-    score_testo = dict_testo[top_testo]
+        top_visivo = miglior_risultato[0]
+        score_visivo = miglior_risultato[1]
+        dict_visivo = miglior_risultato[2]
 
-    # 2. Valutazione incongruenza
-    soglia_differenza = 0.7
+        # 3. Valutazione incongruenza
+        soglia_differenza = 0.7
 
-    risposta_bot = "🧠 **Analisi Multimodale:**\n"
-    risposta_bot += f"- **Volto:** {top_visivo.capitalize()} ({score_visivo*100:.2f}%)\n"
-    risposta_bot += f"- **Testo:** {top_testo.capitalize()} ({score_testo*100:.2f}%)\n\n"
+        risposta_bot = f"🧠 **Analisi Multimodale (su {len(buffer_frames)} frame):**\n"
+        risposta_bot += f"- **Volto (Predominante):** {top_visivo.capitalize()} ({score_visivo*100:.2f}%)\n"
+        risposta_bot += f"- **Testo:** {top_testo.capitalize()} ({score_testo*100:.2f}%)\n\n"
 
-    if top_visivo != top_testo:
-        risposta_bot += "⚠️ **Rilevata INCONGRUENZA STRUTTURALE** tra volto e testo. -> *Fase di Esplorazione*."
-    else:
-        diff = abs(score_visivo - score_testo)
-        if diff > soglia_differenza:
-            risposta_bot += f"⚠️ **Incongruenza di intensità** (differenza: {diff*100:.2f}%). -> *Fase di Esplorazione*."
+        if top_visivo != top_testo:
+            risposta_bot += "⚠️ **Rilevata INCONGRUENZA STRUTTURALE** tra volto e testo. -> *Fase di Esplorazione*."
         else:
-            risposta_bot += f"✅ **Modelli Congruenti** (differenza: {diff*100:.2f}%). -> *Late Fusion*."
+            diff = abs(score_visivo - score_testo)
+            if diff > soglia_differenza:
+                risposta_bot += f"⚠️ **Incongruenza di intensità** (differenza: {diff*100:.2f}%). -> *Fase di Esplorazione*."
+            else:
+                risposta_bot += f"✅ **Modelli Congruenti** (differenza: {diff*100:.2f}%). -> *Late Fusion*."
 
-    history.append({"role": "user", "content": user_message})
-    history.append({"role": "assistant", "content": risposta_bot})
+        history[-1]["content"] = risposta_bot
+        yield "", history
 
-    return "", history
+    except Exception as e:
+        history[-1]["content"] = f"⚠️ Errore nell'elaborazione: {str(e)}"
+        yield "", history
 
 with gr.Blocks() as demo:
     gr.Markdown("# 🧠 Sistema Multimodale Emotional Management")
+
+    frame_buffer = gr.State([])
 
     with gr.Row():
         with gr.Column(scale=1):
@@ -127,15 +164,21 @@ with gr.Blocks() as demo:
                 )
                 btn_invia = gr.Button("Invia", variant="primary", scale=1)
 
+    webcam_input.stream(
+        fn=update_buffer,
+        inputs=[webcam_input, frame_buffer],
+        outputs=frame_buffer
+    )
+
     msg.submit(
         fn=risposta_chat,
-        inputs=[msg, webcam_input, chatbot],
+        inputs=[msg, frame_buffer, chatbot], 
         outputs=[msg, chatbot],
     )
 
     btn_invia.click(
         fn=risposta_chat,
-        inputs=[msg, webcam_input, chatbot],
+        inputs=[msg, frame_buffer, chatbot], 
         outputs=[msg, chatbot],
     )
 
@@ -151,7 +194,6 @@ if __name__ == "__main__":
     t = threading.Thread(target=avvia_server, daemon=True)
     t.start()
 
-    # Attendi che il server Gradio sia pronto prima di aprire la WebView
     time.sleep(2)
 
     webview.create_window(
