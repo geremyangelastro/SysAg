@@ -5,3 +5,6 @@ gradio
 opencv-python
 requests
 pywebview
+sentencepiece
+sacremoses
+langdetect

@@ -1,0 +1,17 @@
+<div class="flip-container">
+    <div class="flip-inner">
+        <!-- FRONTE DELLA CARTA -->
+        <div class="flip-front">
+            <h2 style="margin-bottom: 15px; font-size: 22px;">{titolo_front}</h2>
+            <p style="margin-bottom: 20px; text-align: center;">{testo_front}</p>
+            {pulsante_front}
+        </div>
+        <!-- RETRO DELLA CARTA -->
+        <div class="flip-back" style="border: 4px solid {colore_bordo} !important;">
+            <div style="flex-grow: 1; width: 100%; font-size: 15px; line-height: 1.5;">{html_content}</div>
+            <div style="text-align: center; width: 100%; margin-top: 15px;">
+                <button class="flip-btn" onclick="this.closest('.flip-inner').classList.toggle('is-flipped')">🔄 Nascondi</button>
+            </div>
+        </div>
+    </div>
+</div>
