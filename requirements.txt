@@ -8,3 +8,4 @@ pywebview
 sentencepiece
 sacremoses
 langdetect
+langchain-ollama
