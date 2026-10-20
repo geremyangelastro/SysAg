@@ -245,7 +245,7 @@ def gestisci_azione(user_message, app_language, buffer_frames, current_state, hi
         yield gr.update(), history, genera_card_html("Nessun testo da analizzare.", colore_bordo="transparent", abilitato=False), current_state, gr.update()
         return
 
-    # 3. CONTROLLO SE È UNA CONFERMA TECNICA DI RIPRISTINO WEBCAM (es. "e ora?")
+    # 3. CONTROLLO SE È UNA CONFERMA TECNICA DI RIPRISTINO WEBCAM
     if is_conferma_webcam(user_message, history):
         user_message = str(user_message).strip()
         history.append({"role": "user", "content": user_message})
@@ -360,7 +360,7 @@ def gestisci_azione(user_message, app_language, buffer_frames, current_state, hi
 
             contesto_per_ollama = f"L'utente si trova in uno stato emotivo di tipo '{emozione_finale_media}' ed è associato alla {nome_zona}."
 
-        # 8. GENERAZIONE RISPOSTA CHAT TRAMITE OLLAMA CON PREFISSO DELLO STATO
+        # 8. GENERAZIONE RISPOSTA CHAT TRAMITE OLLAMA
         risposta_bot = parla_ollama(current_state, user_message, contesto_per_ollama)
         history[-1]["content"] = f"({current_state}) {risposta_bot}"
 
