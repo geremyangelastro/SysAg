@@ -1,11 +1,14 @@
 import threading
 import time
 import re
+import base64
+from io import BytesIO
 from collections import Counter
 from PIL import Image
 from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
 from langdetect import detect, DetectorFactory
 from langchain_ollama import ChatOllama
+from langchain_core.messages import HumanMessage
 import webview
 import gradio as gr
 
@@ -19,14 +22,20 @@ print("Caricamento modello di traduzione...")
 tokenizer_it_en = AutoTokenizer.from_pretrained("Helsinki-NLP/opus-mt-it-en")
 model_it_en = AutoModelForSeq2SeqLM.from_pretrained("Helsinki-NLP/opus-mt-it-en")
 
-print("Inizializzazione del modello Ollama...")
-NOME_MODELLO_OLLAMA = "qwen2.5:7b"
+print("Inizializzazione dei modelli Ollama (Chat e Visione)...")
 try:
-    llm = ChatOllama(model=NOME_MODELLO_OLLAMA, temperature=0.3)
-    print("Ollama collegato con successo!")
+    llm_chat = ChatOllama(model="qwen2.5:7b", temperature=0.3)
+    print("✅ Ollama (qwen2.5:7b) collegato con successo per il Dialogo!")
 except Exception as e:
-    print(f"Attenzione: Impossibile collegare Ollama ({e}). Verificare che 'ollama serve' sia attivo.")
-    llm = None
+    print(f"⚠️ Impossibile collegare qwen2.5:7b ({e}).")
+    llm_chat = None
+
+try:
+    llm_vision = ChatOllama(model="llava", temperature=0.1)
+    print("✅ Ollama (LLaVA) collegato con successo per la Visione!")
+except Exception as e:
+    print(f"⚠️ Impossibile collegare llava ({e}).")
+    llm_vision = None
 
 # --- MACCHINA A STATI PER IL DIALOGO ---
 STATI = {
@@ -110,7 +119,7 @@ def genera_card_html(contenuto, titolo_front="📊 Analisi in attesa", testo_fro
         with open("card_template.html", "r", encoding="utf-8") as f:
             template = f.read()
     except FileNotFoundError:
-        return "Template HTML non trovato."
+        return "Template HTML non trovato. Assicurati che card_template.html sia nella cartella."
         
     if abilitato:
         pulsante_html = '<button class="flip-btn" onclick="this.closest(\'.flip-inner\').classList.toggle(\'is-flipped\')">🔄 Svela Risultati</button>'
@@ -179,21 +188,21 @@ def is_conferma_webcam(user_message, history):
     if any(f in txt_user for f in frasi_tipiche) and len(txt_user) < 35:
         return True
 
-    if llm:
+    if llm_chat:
         try:
             prompt = (
                 f"L'utente ha scritto: \"{user_message}\" dopo che l'assistente gli aveva segnalato che la webcam non era attiva.\n"
                 "L'utente sta esprimendo un'emozione/stato d'animo oppure sta solo chiedendo/confermando che la fotocamera è attiva (es. 'e ora?', 'fatto')?\n"
                 "Rispondi ESCLUSIVAMENTE 'TECNICO' o 'EMOZIONE'."
             )
-            res = llm.invoke(prompt).content.strip().upper()
+            res = llm_chat.invoke(prompt).content.strip().upper()
             return "TECNICO" in res
         except Exception:
             pass
     return False
 
 def obiettivo_raggiunto(stato, messaggio_utente):
-    if not llm or not STATI[stato]["obiettivo"]:
+    if not llm_chat or not STATI[stato]["obiettivo"]:
         return True
 
     domanda = (
@@ -202,32 +211,74 @@ def obiettivo_raggiunto(stato, messaggio_utente):
         "L'obiettivo è stato raggiunto da questo messaggio dell'utente? Rispondi ESCLUSIVAMENTE con la parola 'SI' oppure 'NO'."
     )
     try:
-        risposta = llm.invoke(domanda).content
+        risposta = llm_chat.invoke(domanda).content
         return risposta.strip().upper().startswith("S")
     except Exception as e:
-        print(f"Errore nella verifica dell'obiettivo con Ollama: {e}")
+        print(f"Errore nella verifica dell'obiettivo con Qwen: {e}")
         return True
 
 def parla_ollama(stato, messaggio_utente, contesto_emotivo=""):
-    if not llm:
-        return "Mi spiace, il modello Ollama non è attualmente connesso."
+    if not llm_chat:
+        return "Mi spiace, il modello chat non è attualmente connesso."
 
     istruzioni_sistema = (
         f"{STATI[stato]['dire']}\n"
         f"Contesto emotivo rilevato dall'analisi: {contesto_emotivo}\n"
-        "REGOLA FONDAMENTALE: Rispondi SEMPRE in italiano, in modo breve, naturale e umano (massimo 2-3 frasi).\n"
+        "REGOLA FONDAMENTALE 1: Rispondi SEMPRE in italiano, in modo breve, naturale e umano (massimo 2-3 frasi).\n"
+        "REGOLA FONDAMENTALE 2: Parla di te STESSO ESCLUSIVAMENTE in prima persona singolare ('io', 'sono qui', 'ti ascolto') e MAI al plurale ('noi', 'siamo qui'). Rivolgiti all'utente dando del 'tu'. Sei un singolo individuo, non un'organizzazione.\n"
         "DIVIETO ASSOLUTO: Non menzionare MAI termini tecnici come 'Late Fusion', 'Zona Blu', 'Zona Verde', 'Zona Gialla', 'Zona Rossa', 'incongruenza strutturale', né percentuali o nomi di modelli."
     )
 
     try:
-        risposta = llm.invoke([
+        risposta = llm_chat.invoke([
             ("system", istruzioni_sistema),
             ("human", messaggio_utente)
         ])
         return risposta.content.strip()
     except Exception as e:
-        print(f"Errore nella generazione del messaggio con Ollama: {e}")
-        return "Sono qui per ascoltarti. Come posso esserti d'aiuto in questo momento?"
+        print(f"Errore nella generazione del messaggio con Qwen: {e}")
+        return "Sono qui per ascoltarti. Come posso esserti d'aiuto in questo momento?" 
+
+def ottieni_analisi_multimodale(messaggio_utente, frame_pil):
+    """
+    Invia l'immagine nuda e cruda e il testo dell'utente al VLM LLaVA, 
+    senza fargli sapere nulla dei risultati della Late Fusion.
+    """
+    if not llm_vision:
+        return "Non disponibile", "Modello VLM (LLaVA) non connesso."
+
+    try:
+        buffered = BytesIO()
+        frame_pil.save(buffered, format="JPEG")
+        img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+        prompt_testo = (
+            f"Sei un modello multimodale esperto di emozioni. Guarda il volto nell'immagine e leggi il testo: \"{messaggio_utente}\".\n"
+            "Valuta l'emozione globale considerando il contesto e le possibili discrepanze (es. sarcasmo, dissimulazione, sforzo di sorridere).\n"
+            "Rispondi ESCLUSIVAMENTE rispettando questo formato su due righe:\n"
+            "EMOZIONE: <una parola tra Gioia, Tristezza, Rabbia, Paura, Sorpresa, Disgusto, Neutro>\n"
+            "ANALISI: <spiegazione sintetica della relazione tra immagine e testo in max 20 parole>"
+        )
+
+        messaggio = HumanMessage(
+            content=[
+                {"type": "text", "text": prompt_testo},
+                {"type": "image_url", "image_url": f"data:image/jpeg;base64,{img_str}"}
+            ]
+        )
+
+        res = llm_vision.invoke([messaggio]).content.strip()
+        emo_vlm = "Neutro"
+        analisi_vlm = res
+        for line in res.split("\n"):
+            if line.startswith("EMOZIONE:"):
+                emo_vlm = line.replace("EMOZIONE:", "").strip()
+            elif line.startswith("ANALISI:"):
+                analisi_vlm = line.replace("ANALISI:", "").strip()
+        
+        return emo_vlm, analisi_vlm
+    except Exception as e:
+        return "Errore", f"Impossibile completare l'analisi VLM: {str(e)}"
 
 def gestisci_azione(user_message, app_language, buffer_frames, current_state, history):
     if history is None:
@@ -303,11 +354,13 @@ def gestisci_azione(user_message, app_language, buffer_frames, current_state, hi
         else:
             text_to_analyze = user_message
 
+        # A. Pipeline Testo
         raw_text = text_classifier(text_to_analyze)
         dict_testo = format_results(raw_text, is_text_model=True)
         top_testo = max(dict_testo, key=dict_testo.get)
         score_testo = dict_testo[top_testo]
 
+        # B. Pipeline Visione
         risultati_visione = []
         for frame in buffer_frames:
             raw_vision = vision_classifier(frame)
@@ -329,18 +382,47 @@ def gestisci_azione(user_message, app_language, buffer_frames, current_state, hi
         score_visivo = miglior_risultato[1]
         dict_visivo = miglior_risultato[2]
 
+        # C. VERA INTERROGAZIONE MULTIMODALE INDIPENDENTE (LLaVA)
+        ultimo_frame_pil = buffer_frames[-1]
+        emo_vlm, analisi_vlm = ottieni_analisi_multimodale(
+            user_message, ultimo_frame_pil
+        )
+
         ha_incongruenza_strutturale = (top_visivo != top_testo)
+        
+        dettagli_v = " | ".join([f"{k.capitalize()}: {v*100:.1f}%" for k, v in sorted(dict_visivo.items(), key=lambda x: x[1], reverse=True)])
+        dettagli_t = " | ".join([f"{k.capitalize()}: {v*100:.1f}%" for k, v in sorted(dict_testo.items(), key=lambda x: x[1], reverse=True)])
 
         if ha_incongruenza_strutturale:
             emozione_finale_media = top_visivo
             colore_dinamico, nome_zona = determina_colore_bordo(emozione_finale_media)
             
             risposta_analisi = avviso_lingua
-            risposta_analisi += f"🎯 **Zona di Regolazione Rilevata:** {nome_zona}\n\n"
-            risposta_analisi += f"⚠️ **Nota:** È emersa una discrepanza tra la tua espressione visiva ({top_visivo}) e le parole utilizzate ({top_testo}).\n\n"
-            risposta_analisi += f"🧠 **Dettagli Tecnici:**\n- Volto: {top_visivo.capitalize()} ({score_visivo*100:.1f}%)\n- Testo: {top_testo.capitalize()} ({score_testo*100:.1f}%)\n"
+            risposta_analisi += f"🎯 **Zona di Regolazione:** {nome_zona}\n\n"
+            
+            risposta_analisi += "⚖️ **CONFRONTO MODELLI MULTIMODALI**\n"
+            risposta_analisi += "───────────────────────────\n"
+            risposta_analisi += "1️⃣ **VLM: LLaVA**\n"
+            risposta_analisi += f"• **Predizione Globale:** **{emo_vlm.capitalize()}**\n"
+            risposta_analisi += f"• **Valutazione Contextual:** {analisi_vlm}\n\n"
+            
+            risposta_analisi += "2️⃣ **Late Fusion (ViT + RoBERTa)**\n"
+            risposta_analisi += f"• **Esito:** ⚠️ *Discrepanza tra volto ({top_visivo.capitalize()}) e testo ({top_testo.capitalize()})*\n\n"
+            
+            html_dettagli = (
+                "<details style='margin-top:10px; cursor:pointer; padding:8px; border:1px solid rgba(0,0,0,0.1); border-radius:8px; background:rgba(255,255,255,0.05);'>"
+                "<summary style='font-weight:bold; color:#0056b3; outline:none;'>🔍 Clicca per i DETTAGLI ANALITICI</summary>"
+                "<div style='margin-top:10px; font-size:0.9em;'>"
+                f"📷 <b>Volto (ViT):</b><br><i>{dettagli_v}</i><br><br>"
+                f"📝 <b>Testo (RoBERTa):</b><br><i>{dettagli_t}</i>"
+                "</div></details>"
+            )
+            risposta_analisi += html_dettagli
 
-            contesto_per_ollama = f"È stata rilevata una discrepanza tra l'espressione visiva ({top_visivo}) e le parole dell'utente ({top_testo}). L'utente potrebbe nascondere stanchezza o sforzo."
+            contesto_per_ollama = (
+                f"Discrepanza tra volto ({top_visivo}) e testo ({top_testo}). "
+                f"LLaVA valuta l'emozione globale come '{emo_vlm}' con motivazione: {analisi_vlm}."
+            )
         else:
             emozioni = set(dict_visivo.keys()).union(set(dict_testo.keys()))
             medie_emozioni = {}
@@ -351,16 +433,37 @@ def gestisci_azione(user_message, app_language, buffer_frames, current_state, hi
 
             emozione_finale_media = max(medie_emozioni, key=medie_emozioni.get)
             colore_dinamico, nome_zona = determina_colore_bordo(emozione_finale_media)
+            dettagli_m = " | ".join([f"{k.capitalize()}: {v*100:.1f}%" for k, v in sorted(medie_emozioni.items(), key=lambda x: x[1], reverse=True)])
 
             risposta_analisi = avviso_lingua
-            risposta_analisi += f"🎯 **Zona di Regolazione Rilevata:** {nome_zona}\n\n"
-            risposta_analisi += f"🔗 **Fusione Tardiva:** Emozione prevalente stimata: **{emozione_finale_media.capitalize()}**\n\n"
-            det_medie = [f"{k.capitalize()}: {v*100:.1f}%" for k, v in sorted(medie_emozioni.items(), key=lambda x: x[1], reverse=True)]
-            risposta_analisi += f"*(Medie analitiche: {' | '.join(det_medie)})*"
+            risposta_analisi += f"🎯 **Zona di Regolazione:** {nome_zona}\n\n"
+            
+            risposta_analisi += "⚖️ **CONFRONTO MODELLI MULTIMODALI**\n"
+            risposta_analisi += "───────────────────────────\n"
+            risposta_analisi += "1️⃣ **VLM: LLaVA**\n"
+            risposta_analisi += f"• **Predizione Globale:** **{emo_vlm.capitalize()}**\n"
+            risposta_analisi += f"• **Valutazione Contextual:** {analisi_vlm}\n\n"
+            
+            risposta_analisi += "2️⃣ **Late Fusion (ViT + RoBERTa)**\n"
+            risposta_analisi += f"• **Esito:** ✅ *Concordante ({emozione_finale_media.capitalize()})*\n\n"
+            
+            html_dettagli = (
+                "<details style='margin-top:10px; cursor:pointer; padding:8px; border:1px solid rgba(0,0,0,0.1); border-radius:8px; background:rgba(255,255,255,0.05);'>"
+                "<summary style='font-weight:bold; color:#0056b3; outline:none;'>🔍 Clicca per i DETTAGLI ANALITICI</summary>"
+                "<div style='margin-top:10px; font-size:0.9em;'>"
+                f"📊 <b>Media Fusa (Top Scores):</b><br><i>{dettagli_m}</i><br><br>"
+                f"📷 <b>Volto (ViT):</b><br><i>{dettagli_v}</i><br><br>"
+                f"📝 <b>Testo (RoBERTa):</b><br><i>{dettagli_t}</i>"
+                "</div></details>"
+            )
+            risposta_analisi += html_dettagli
 
-            contesto_per_ollama = f"L'utente si trova in uno stato emotivo di tipo '{emozione_finale_media}' ed è associato alla {nome_zona}."
+            contesto_per_ollama = (
+                f"L'emozione concorde è '{emozione_finale_media}'. "
+                f"LLaVA confermando precisa: {analisi_vlm}."
+            )
 
-        # 8. GENERAZIONE RISPOSTA CHAT TRAMITE OLLAMA
+        # 8. GENERAZIONE RISPOSTA CHAT TRAMITE QWEN
         risposta_bot = parla_ollama(current_state, user_message, contesto_per_ollama)
         history[-1]["content"] = f"({current_state}) {risposta_bot}"
 
@@ -372,7 +475,6 @@ def gestisci_azione(user_message, app_language, buffer_frames, current_state, hi
             abilitato=True
         )
 
-        # 9. GESTIONE FINE SESSIONE
         if current_state == "fine":
             yield gr.update(interactive=False, value="", placeholder="Sessione conclusa. Clicca Ricomincia..."), history, card_finale, current_state, gr.update(value="🔄 Ricomincia", variant="secondary")
         else:
@@ -392,7 +494,6 @@ with gr.Blocks() as demo:
     frame_buffer = gr.State([])
     dialogue_state = gr.State("saluto")
 
-    # --- INTESTAZIONE ---
     with gr.Row():
         with gr.Column(scale=4):
             gr.Markdown("# 🧠 Sistema Multimodale Emotional Management")
@@ -404,9 +505,7 @@ with gr.Blocks() as demo:
                     label="Lingua dell'applicazione"
                 )
 
-    # --- CORPO PRINCIPALE ---
     with gr.Row():
-        # COLONNA SINISTRA (Webcam e Card)
         with gr.Column(scale=1):
             gr.Markdown("### 📷 Webcam Live")
             webcam_input = gr.Image(
@@ -421,10 +520,8 @@ with gr.Blocks() as demo:
                 ),
             )
             
-            # --- CARD 3D HTML ---
             card_analisi = gr.HTML(genera_card_html("<em>In attesa del primo messaggio...</em>", colore_bordo="transparent", abilitato=False))
 
-        # COLONNA DESTRA (Chat con saluto iniziale automatico e stato visibile)
         with gr.Column(scale=2):
             gr.Markdown("### 💬 Chat")
             chatbot = gr.Chatbot(
