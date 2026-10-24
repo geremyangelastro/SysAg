@@ -9,3 +9,5 @@ sentencepiece
 sacremoses
 langdetect
 langchain-ollama
+langchain-groq 
+langchain-openai
