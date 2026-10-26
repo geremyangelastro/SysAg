@@ -240,10 +240,6 @@ def parla_ollama(stato, messaggio_utente, contesto_emotivo=""):
         return "Sono qui per ascoltarti. Come posso esserti d'aiuto in questo momento?" 
 
 def ottieni_analisi_multimodale(messaggio_utente, frame_pil):
-    """
-    Invia l'immagine nuda e cruda e il testo dell'utente al VLM LLaVA, 
-    senza fargli sapere nulla dei risultati della Late Fusion.
-    """
     if not llm_vision:
         return "Non disponibile", "Modello VLM (LLaVA) non connesso."
 
@@ -328,11 +324,8 @@ def gestisci_azione(user_message, app_language, buffer_frames, current_state, hi
         yield gr.update(), history, card_err, current_state, gr.update()
         return
 
-    # 6. VALUTAZIONE TRANSIZIONE DI STATO TRAMITE OLLAMA
-    if obiettivo_raggiunto(current_state, user_message):
-        prossimo_stato = STATI[current_state]["prossimo"]
-        if prossimo_stato:
-            current_state = prossimo_stato
+    # 6. VALUTAZIONE TRANSIZIONE OLLAMA
+    avanza_stato = obiettivo_raggiunto(current_state, user_message)
 
     # 7. ANALISI MULTIMODALE COMPLETA
     try:
@@ -382,14 +375,22 @@ def gestisci_azione(user_message, app_language, buffer_frames, current_state, hi
         score_visivo = miglior_risultato[1]
         dict_visivo = miglior_risultato[2]
 
+        ha_incongruenza_strutturale = (top_visivo != top_testo)
+
+        # GESTIONE TRANSIZIONE DI STATO CON SALTO DELL'ESPLORAZIONE
+        if avanza_stato:
+            prossimo_stato = STATI[current_state]["prossimo"]
+            if prossimo_stato == "esplorazione" and not ha_incongruenza_strutturale:
+                current_state = "regolazione"
+            elif prossimo_stato:
+                current_state = prossimo_stato
+
         # C. VERA INTERROGAZIONE MULTIMODALE INDIPENDENTE (LLaVA)
         ultimo_frame_pil = buffer_frames[-1]
         emo_vlm, analisi_vlm = ottieni_analisi_multimodale(
             user_message, ultimo_frame_pil
         )
 
-        ha_incongruenza_strutturale = (top_visivo != top_testo)
-        
         dettagli_v = " | ".join([f"{k.capitalize()}: {v*100:.1f}%" for k, v in sorted(dict_visivo.items(), key=lambda x: x[1], reverse=True)])
         dettagli_t = " | ".join([f"{k.capitalize()}: {v*100:.1f}%" for k, v in sorted(dict_testo.items(), key=lambda x: x[1], reverse=True)])
 
